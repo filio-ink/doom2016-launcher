@@ -678,7 +678,13 @@ final class LauncherModel: ObservableObject {
     }
 
     private var wineInstalled: Bool {
-        FileManager.default.isExecutableFile(atPath: SupportFolder.url.appendingPathComponent("wine/bin/wine").path)
+        guard FileManager.default.isExecutableFile(atPath: SupportFolder.url.appendingPathComponent("wine/bin/wine").path),
+              let manifestURL = Bundle.main.resourceURL?.appendingPathComponent("engine/dependencies.json"),
+              let manifestData = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+              let wine = manifest["wine"] as? [String: Any], let digest = wine["sha256"] as? String,
+              let receipt = try? String(contentsOf: SupportFolder.url.appendingPathComponent("wine/.verified-sha256"), encoding: .utf8) else { return false }
+        return receipt.trimmingCharacters(in: .whitespacesAndNewlines) == digest
     }
 
     private var wineReady: Bool {
@@ -715,11 +721,11 @@ final class LauncherModel: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .informational
         if force {
-            alert.messageText = "Update Wine"
-            alert.informativeText = "The latest WineHQ macOS build will be downloaded, about 180 MB. It replaces the Wine copy used by this launcher. Saves and settings stay."
+            alert.messageText = "Reinstall Pinned Wine"
+            alert.informativeText = "The Wine version pinned by this launcher will be downloaded and verified, about 215 MB. It replaces the Wine copy used by this launcher. Saves and settings stay."
         } else {
             alert.messageText = "Wine will be downloaded"
-            alert.informativeText = "The launcher does not include Wine. The latest WineHQ macOS build is about 180 MB. It is downloaded once, then a private Wine environment is created."
+            alert.informativeText = "The launcher does not include Wine. The pinned Wine build is about 215 MB. Its SHA-256 is checked before installation, then a private Wine environment is created."
         }
         alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Not Now")
@@ -972,7 +978,7 @@ final class LauncherModel: ObservableObject {
     /// `-B` and `PYTHONDONTWRITEBYTECODE` keep Python from writing `__pycache__` into the signed bundle.
     private func configurePython(_ process: Process, arguments: [String]) {
         process.executableURL = pythonURL
-        process.arguments = ["-B"] + arguments
+        process.arguments = ["-B", "-E", "-s"] + arguments
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         process.environment = environment
@@ -1267,7 +1273,7 @@ struct ContentView: View {
                             Spacer()
                             Button("Kill all wine processes") { model.killWine() }
                                 .disabled(model.updating)
-                            Button("Update Wine") { model.updateWine() }
+                            Button("Reinstall Pinned Wine") { model.updateWine() }
                                 .disabled(model.running || model.updating)
                         }
                     }
@@ -1502,12 +1508,11 @@ private struct GogSignIn: NSViewRepresentable {
     var onCode: (String) -> Void
 
     func makeNSView(context: Context) -> WKWebView {
-        let web = WKWebView()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = context.coordinator
-        let address = "https://auth.gog.com/auth?client_id=46899977096215655&redirect_uri=https%3A%2F%2Fembed.gog.com%2Fon_login_success%3Forigin%3Dclient&response_type=code&layout=client2"
-        if let url = URL(string: address) {
-            web.load(URLRequest(url: url))
-        }
+        web.load(URLRequest(url: GogOAuthPolicy.authorizationURL(state: context.coordinator.state)))
         return web
     }
 
@@ -1520,13 +1525,19 @@ private struct GogSignIn: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate {
         let onCode: (String) -> Void
         var delivered = false
+        let state = UUID().uuidString
 
         init(onCode: @escaping (String) -> Void) {
             self.onCode = onCode
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if deliver(webView.url) || deliver(navigationAction.request.url) {
+            if deliver(navigationAction.request.url, isMainFrame: navigationAction.targetFrame?.isMainFrame == true) {
+                decisionHandler(.cancel)
+                return
+            }
+            guard let url = navigationAction.request.url,
+                  GogOAuthPolicy.permitsNavigation(url, isMainFrame: navigationAction.targetFrame?.isMainFrame == true) else {
                 decisionHandler(.cancel)
                 return
             }
@@ -1534,13 +1545,12 @@ private struct GogSignIn: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            _ = deliver(webView.url)
+            _ = deliver(webView.url, isMainFrame: true)
         }
 
-        private func deliver(_ url: URL?) -> Bool {
-            guard !delivered, let url, url.host?.contains("gog.com") == true else { return false }
-            guard let code = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "code" })?.value, !code.isEmpty else { return false }
+        private func deliver(_ url: URL?, isMainFrame: Bool) -> Bool {
+            guard !delivered, let url,
+                  let code = GogOAuthPolicy.code(from: url, state: state, isMainFrame: isMainFrame) else { return false }
             delivered = true
             onCode(code)
             return true

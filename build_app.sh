@@ -3,24 +3,24 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/dist/Doom2016GOG.app"
-KOSMIC_ZIP="$ROOT/dist/upstream/libvulkan_kosmickrisp-x86_64.zip"
-KOSMIC_SHA="927fb90c337f655725bdafa2f9e2c14cac476e45efaa9598b16370e8f52132d2"
 KOSMIC_SRC="$ROOT/dist/upstream/kosmickrisp"
-PYTHON_DIR="${PYTHON_STANDALONE:-$ROOT/dist/python-standalone}"
-VERSION="${VERSION:-1.1}"
-BUILD="${BUILD:-2}"
+PYTHON_DIR="$ROOT/dist/python-standalone"
+VERSION="${VERSION:-1.3.1}"
+BUILD="${BUILD:-131}"
+UPDATE_REPOSITORY="${UPDATE_REPOSITORY-filio-ink/doom2016-launcher}"
+if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){1,2}(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$ || ! "$BUILD" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
+    echo "Invalid app version or build number." >&2
+    exit 1
+fi
+if [[ -n "$UPDATE_REPOSITORY" && ! "$UPDATE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Invalid update repository." >&2
+    exit 1
+fi
 
 mkdir -p "$ROOT/dist/upstream"
-if [[ ! -f "$KOSMIC_SRC/libvulkan_kosmickrisp.dylib" ]]; then
-    if [[ ! -f "$KOSMIC_ZIP" ]]; then
-        curl -fL "https://github.com/truwa/kosmickrisp-compat/releases/download/v0.1.0/libvulkan_kosmickrisp-x86_64.zip" \
-            -o "$KOSMIC_ZIP"
-    fi
-    echo "$KOSMIC_SHA  $KOSMIC_ZIP" | shasum -a 256 -c -
-    rm -rf "$KOSMIC_SRC"
-    mkdir -p "$KOSMIC_SRC"
-    unzip -o "$KOSMIC_ZIP" -d "$KOSMIC_SRC"
-fi
+# Both the source ZIP and the extracted library have checked-in SHA-256 pins.
+python3 -B "$ROOT/dependencies.py" kosmic "$ROOT/dist/upstream/launcher-1.3.zip" \
+    --extract "$KOSMIC_SRC"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" \
@@ -30,7 +30,7 @@ mkdir -p "$APP/Contents/MacOS" \
 
 cp "$KOSMIC_SRC/libvulkan_kosmickrisp.dylib" "$APP/Contents/Frameworks/"
 cp "$ROOT/vulkan/kosmickrisp_icd.json" "$APP/Contents/Resources/vulkan/icd.d/"
-cp "$ROOT/launch.py" "$ROOT/NOTICES.txt" "$APP/Contents/Resources/engine/"
+cp "$ROOT/launch.py" "$ROOT/dependencies.py" "$ROOT/dependencies.json" "$ROOT/NOTICES.txt" "$APP/Contents/Resources/engine/"
 cp "$ROOT/NOTICES.txt" "$APP/Contents/Resources/NOTICES.txt"
 mkdir -p "$APP/Contents/Resources/licenses"
 cp "$ROOT/licenses/"* "$APP/Contents/Resources/licenses/"
@@ -87,16 +87,9 @@ iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET" "$SOURCE"
 chmod 755 "$APP/Contents/Frameworks/libvulkan_kosmickrisp.dylib"
 
-if [[ ! -x "$PYTHON_DIR/bin/python3" ]]; then
-    ASSET="$(curl -fsSL "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" \
-        | python3 -c 'import json,sys; rel=json.load(sys.stdin); print(next(a["browser_download_url"] for a in rel["assets"] if "aarch64-apple-darwin" in a["name"] and a["name"].endswith("install_only.tar.gz")))')"
-    curl -fL "$ASSET" -o "$ROOT/dist/python.tar.gz"
-    rm -rf "$ROOT/dist/python-standalone"
-    mkdir -p "$ROOT/dist/python-standalone"
-    tar -xzf "$ROOT/dist/python.tar.gz" -C "$ROOT/dist/python-standalone" --strip-components 1
-    rm "$ROOT/dist/python.tar.gz"
-    PYTHON_DIR="$ROOT/dist/python-standalone"
-fi
+# Never re-sign Python from an unchecked extracted cache.
+python3 -B "$ROOT/dependencies.py" python "$ROOT/dist/upstream/python.tar.gz" \
+    --extract "$PYTHON_DIR" --prefix python
 mkdir -p "$APP/Contents/Resources/python"
 rsync -a "$PYTHON_DIR/" "$APP/Contents/Resources/python/"
 
@@ -107,7 +100,8 @@ if [[ "${DEBUG:-}" == "1" ]]; then
 fi
 swiftc "${SWIFT_FLAGS[@]}" -o "$APP/Contents/MacOS/Doom" \
     "$ROOT/macos/DoomApp.swift" \
-    "$ROOT/macos/AppUpdate.swift"
+    "$ROOT/macos/AppUpdate.swift" \
+    "$ROOT/macos/SecurityPolicy.swift"
 
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -121,13 +115,15 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>com.doom2016.macos</string>
+    <string>com.doom2016.secure</string>
+    <key>DOOMUpdateRepository</key>
+    <string>${UPDATE_REPOSITORY:-}</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleDisplayName</key>
-    <string>DOOM (2016)</string>
+    <string>DOOM (2016) Secure</string>
     <key>CFBundleName</key>
-    <string>DOOM (2016)</string>
+    <string>DOOM (2016) Secure</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -150,16 +146,15 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-SIGN_ID="${SIGN_ID:-Developer ID Application: Mehmet Akif Ozdas (2DG34W64L7)}"
+SIGN_ID="${SIGN_ID:--}"
 ENTITLEMENTS="$ROOT/macos/entitlements.plist"
-if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
-    if [[ "${REQUIRE_SIGN:-}" == "1" ]]; then
-        echo "Developer ID certificate not found: $SIGN_ID" >&2
-        exit 1
-    fi
-    echo "Built $APP (unsigned; certificate not found)"
-    du -sh "$APP"
-    exit 0
+if [[ "$SIGN_ID" == "-" && "${REQUIRE_SIGN:-}" == "1" ]]; then
+    echo "A release requires a Developer ID signing identity." >&2
+    exit 1
+fi
+if [[ "$SIGN_ID" != "-" ]] && ! security find-identity -v -p codesigning | grep -Fq -- "$SIGN_ID"; then
+    echo "Requested signing identity not found: $SIGN_ID" >&2
+    exit 1
 fi
 python3 - "$APP" "$SIGN_ID" "$ENTITLEMENTS" <<'PY'
 import os, subprocess, sys
@@ -178,18 +173,20 @@ found.sort(reverse=True)
 for _, path, kind in found:
     command = [
         "codesign", "--force", "--sign", identity,
-        "--options", "runtime", "--timestamp",
+        "--options", "runtime",
     ]
+    if identity != "-":
+        command.append("--timestamp")
     # Entitlements apply to executables. Libraries are sealed with the hardened runtime only.
     if "executable" in kind and "shared library" not in kind and "bundle" not in kind:
         command.extend(["--entitlements", entitlements])
     command.append(path)
     subprocess.check_call(command)
-subprocess.check_call([
-    "codesign", "--force", "--sign", identity,
-    "--options", "runtime", "--timestamp",
-    "--entitlements", entitlements, root,
-])
+command = ["codesign", "--force", "--sign", identity, "--options", "runtime",
+           "--entitlements", entitlements]
+if identity != "-":
+    command.append("--timestamp")
+subprocess.check_call(command + [root])
 PY
 codesign --verify --deep --strict --verbose=2 "$APP"
 

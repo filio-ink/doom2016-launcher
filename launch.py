@@ -8,7 +8,7 @@ sys.dont_write_bytecode = True
 """Start a GOG copy of DOOM (2016) with Wine and the KosmicKrisp compat driver.
 
 The game stays where the user put it. The Wine prefix lives under
-~/Library/Application Support/DOOM 2016. The first launch downloads the latest
+~/Library/Application Support/DOOM 2016. The first launch downloads a pinned, verified
 WineHQ macOS build from Gcenx and creates the prefix.
 """
 import argparse
@@ -26,6 +26,8 @@ import time
 import tempfile
 import urllib.request
 
+from dependencies import MANIFEST, archive_parts, download_verified, extract_tar, verified_file
+
 ROOT = Path(__file__).resolve().parent
 SUPPORT = Path.home() / "Library/Application Support/DOOM 2016"
 
@@ -37,14 +39,17 @@ def ensure_support() -> None:
 
 UPSTREAM = ROOT / "dist/upstream"
 WINE_DIST = UPSTREAM / "wine-extract/Wine Devel.app/Contents/Resources/wine"
-WINE_RELEASE_API = "https://api.github.com/repos/Gcenx/macOS_Wine_builds/releases/latest"
+WINE_SPEC = MANIFEST["wine"]
 INSTALLED_WINE = SUPPORT / "wine"
 KOSMIC_DIST = UPSTREAM / "kosmickrisp"
 EXE_NAME = "DOOMx64vk.exe"
 
 
 def installed_wine() -> Path | None:
-    if (INSTALLED_WINE / "bin/wine").is_file() and (INSTALLED_WINE / "bin/wineserver").is_file():
+    receipt = INSTALLED_WINE / ".verified-sha256"
+    if (receipt.is_file() and receipt.read_text(encoding="utf-8").strip() == WINE_SPEC["sha256"]
+            and (INSTALLED_WINE / "bin/wine").is_file()
+            and (INSTALLED_WINE / "bin/wineserver").is_file()):
         return INSTALLED_WINE
     return None
 
@@ -72,15 +77,7 @@ def engine_parts():
 
 
 def resolve_engine():
-    wine_root = installed_wine()
-    if wine_root is None:
-        resources = resources_root()
-        if resources is not None and (resources / "wine/bin/wine").is_file():
-            wine_root = resources / "wine"
-        elif resources is None and (WINE_DIST / "bin/wine").is_file():
-            wine_root = WINE_DIST
-        else:
-            wine_root = download_wine()
+    wine_root = installed_wine() or download_wine()
     icd, frameworks, kosmic = engine_parts()
     wine = wine_root / "bin/wine"
     missing = [path for path in (wine, wine_root / "bin/wineserver", icd, kosmic) if not path.is_file()]
@@ -163,7 +160,7 @@ SONY_GAMEPADS = (
 )
 
 
-CRT_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+CRT_SPEC = MANIFEST["crt"]
 
 
 def microsoft_crt_present(prefix: Path) -> bool:
@@ -188,10 +185,7 @@ def ensure_microsoft_crt(wine: Path, environment: dict) -> None:
     cache = SUPPORT / "cache"
     cache.mkdir(parents=True, exist_ok=True)
     redist = cache / "vc_redist.x64.exe"
-    if not redist.is_file() or redist.stat().st_size < 1_000_000:
-        request = urllib.request.Request(CRT_URL, headers={"User-Agent": "doom-2016-macos"})
-        with urllib.request.urlopen(request, timeout=60) as response, redist.open("wb") as output:
-            shutil.copyfileobj(response, output)
+    download_verified(CRT_SPEC, redist)
     quiet = environment.copy()
     quiet["WINEDEBUG"] = "-all"
     completed = subprocess.run(
@@ -427,23 +421,6 @@ def gog_save_sync(folder: Path, force: str | None) -> int:
     return 0
 
 
-def fetch_latest_wine() -> tuple[str, str]:
-    request = urllib.request.Request(WINE_RELEASE_API, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "doom-2016-macos",
-    })
-    with urllib.request.urlopen(request, timeout=30) as response:
-        payload = json.load(response)
-    tag = str(payload.get("tag_name") or "").strip().lstrip("vV")
-    assets = payload.get("assets") or []
-    match = next((asset for asset in assets
-                  if str(asset.get("name") or "").startswith("wine-devel-")
-                  and str(asset.get("name") or "").endswith("-osx64.tar.xz")), None)
-    if match is None or not tag or not match.get("browser_download_url"):
-        raise ValueError("The latest Wine release has no wine-devel macOS build")
-    return tag, str(match["browser_download_url"])
-
-
 def _wine_payload_skipped(relative: str) -> bool:
     path = relative.replace("\\", "/").strip("/")
     return (path == "share/wine/gecko" or path.startswith("share/wine/gecko/")
@@ -452,71 +429,41 @@ def _wine_payload_skipped(relative: str) -> bool:
             or path == "lib/wine/x86_64-unix/vulkan" or path.startswith("lib/wine/x86_64-unix/vulkan/"))
 
 
-def _link_stays_inside(root: Path, link_path: Path, linkname: str) -> bool:
-    if linkname.startswith("/"):
-        return False
-    normalized = os.path.normpath(str(link_path.parent / linkname))
-    root_path = os.path.normpath(str(root))
-    return normalized == root_path or normalized.startswith(root_path + os.sep)
-
-
 def install_wine_archive(archive_path: Path, version: str, destination: Path | None = None) -> Path:
+    if version != WINE_SPEC["version"] or not verified_file(archive_path, WINE_SPEC):
+        raise ValueError("Wine archive does not match this launcher's pinned release")
     destination = destination or INSTALLED_WINE
-    staging = destination.with_name(destination.name + ".new")
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
-    try:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="wine-install-", dir=destination.parent) as temporary:
+        staging = Path(temporary) / "wine"
+        staging.mkdir(mode=0o700)
         with tarfile.open(archive_path, "r:xz") as archive:
-            root = ""
-            for member in archive.getmembers():
-                name = member.name.replace("\\", "/")
-                if name.endswith("/bin/wine") or name.endswith("bin/wine"):
-                    root = name[: -len("bin/wine")]
+            root = None
+            for member in archive:
+                parts = archive_parts(member.name)
+                if parts[-2:] == ("bin", "wine") and len(parts) > 2:
+                    root = parts[:-2]
                     break
-            if not root:
+            if root is None:
                 raise ValueError("The Wine archive has no bin/wine")
-            for member in archive.getmembers():
-                name = member.name.replace("\\", "/")
-                if not name.startswith(root):
-                    continue
-                relative = name[len(root):]
-                if not relative or ".." in Path(relative).parts or _wine_payload_skipped(relative):
-                    continue
-                target = staging / relative
-                if member.isdir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.is_symlink() or target.exists():
-                    target.unlink()
-                if member.issym():
-                    if _link_stays_inside(staging, target, member.linkname):
-                        os.symlink(member.linkname, target)
-                    continue
-                if not member.isfile():
-                    continue
-                source = archive.extractfile(member)
-                if source is None:
-                    continue
-                with source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
-                os.chmod(target, member.mode & 0o777)
-        if not (staging / "bin/wine").is_file() or not (staging / "bin/wineserver").is_file():
+            extract_tar(archive, staging, root, _wine_payload_skipped)
+        if not all((staging / name).is_file() for name in ("bin/wine", "bin/wineserver")):
             raise ValueError("The Wine archive did not contain a usable build")
+        (staging / ".verified-sha256").write_text(WINE_SPEC["sha256"] + "\n", encoding="utf-8")
         previous = destination.with_name(destination.name + ".old")
         if previous.exists():
             shutil.rmtree(previous)
         if destination.exists():
             destination.rename(previous)
-        staging.rename(destination)
+        try:
+            staging.rename(destination)
+        except OSError:
+            if previous.exists():
+                previous.rename(destination)
+            raise
         if previous.exists():
             shutil.rmtree(previous)
-    except Exception:
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
-        raise
-    (destination.parent / "WINE_VERSION").write_text(version.lstrip("vV") + "\n", encoding="utf-8")
+    (destination.parent / "WINE_VERSION").write_text(version + "\n", encoding="utf-8")
     return destination
 
 
@@ -530,27 +477,20 @@ def wine_version_text() -> str:
 
 
 def download_wine(destination: Path | None = None) -> Path:
-    tag, url = fetch_latest_wine()
-    print(f"status Downloading Wine {tag}", flush=True)
-    request = urllib.request.Request(url, headers={"User-Agent": "doom-2016-macos"})
+    tag = WINE_SPEC["version"]
+    print(f"status Downloading verified Wine {tag}", flush=True)
+    reported = -1
+
+    def progress(received: int, total: int) -> None:
+        nonlocal reported
+        percent = received * 100 // total
+        if percent != reported:
+            reported = percent
+            print(f"progress {percent}", flush=True)
+
     with tempfile.TemporaryDirectory(prefix="doom-wine-") as folder:
-        archive = Path(folder) / f"wine-devel-{tag}-osx64.tar.xz"
-        with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as output:
-            total = int(response.headers.get("Content-Length") or 0)
-            received = 0
-            reported = -1
-            while True:
-                chunk = response.read(1 << 20)
-                if not chunk:
-                    break
-                output.write(chunk)
-                received += len(chunk)
-                if total:
-                    percent = received * 100 // total
-                    if percent != reported:
-                        reported = percent
-                        print(f"progress {percent}", flush=True)
-        print("status Installing Wine", flush=True)
+        archive = download_verified(WINE_SPEC, Path(folder) / "wine.tar.xz", progress)
+        print("status Installing verified Wine", flush=True)
         installed = install_wine_archive(archive, tag, destination)
     print(f"installed wine {tag}", flush=True)
     return installed
@@ -558,12 +498,6 @@ def download_wine(destination: Path | None = None) -> Path:
 
 def kill_wine() -> None:
     wine_root = installed_wine()
-    if wine_root is None:
-        resources = resources_root()
-        if resources is not None and (resources / "wine/bin/wine").is_file():
-            wine_root = resources / "wine"
-        elif (WINE_DIST / "bin/wine").is_file():
-            wine_root = WINE_DIST
     if wine_root is None:
         print("status Wine is not installed", flush=True)
         return
@@ -804,7 +738,7 @@ def main() -> int:
     parser.add_argument("--setup-wine", action="store_true",
                         help="Download Wine if needed and create the prefix")
     parser.add_argument("--update-wine", action="store_true",
-                        help="Download the latest Wine again and keep the prefix")
+                        help="Reinstall the pinned verified Wine and keep the prefix")
     parser.add_argument("--kill-wine", action="store_true",
                         help="Stop the Wine processes for this launcher")
     parser.add_argument("--gog-auth", default=None, help="Exchange a GOG sign-in code")

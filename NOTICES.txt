@@ -5,8 +5,8 @@ That folder is at the top of the project and inside the app bundle.
 
 Wine
   LGPL-2.1-or-later
-  Downloaded on first launch from the latest WineHQ macOS build published by Gcenx:
-  https://github.com/Gcenx/macOS_Wine_builds/releases/latest
+  Wine 11.21, downloaded on first launch and checked against the SHA-256 in dependencies.json:
+  https://github.com/Gcenx/macOS_Wine_builds/releases/tag/11.21
 
 Microsoft Visual C++ 2015–2022
   Downloaded on first launch from Microsoft and installed into this app's Wine prefix.

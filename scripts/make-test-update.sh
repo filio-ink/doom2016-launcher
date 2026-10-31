@@ -14,7 +14,7 @@ if [[ ! -d "$SRC" ]]; then
     echo "Build the DEBUG app first: DEBUG=1 ./build_app.sh" >&2
     exit 1
 fi
-SIGN_ID="${SIGN_ID:-Developer ID Application: Mehmet Akif Ozdas (2DG34W64L7)}"
+SIGN_ID="${SIGN_ID:?Set SIGN_ID to your Developer ID Application identity}"
 WORK="$ROOT/dist/update-test"
 rm -rf "$WORK"
 mkdir -p "$WORK/payload"

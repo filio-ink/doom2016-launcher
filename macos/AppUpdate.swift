@@ -2,82 +2,12 @@ import AppKit
 import Foundation
 import SwiftUI
 
-private let bundleIdentifier = "com.doom2016.macos"
-private let releaseAPI = URL(string: "https://api.github.com/repos/truwa/doom2016-launcher/releases/latest")!
-
-private struct SemanticVersion: Comparable, Equatable {
-    var major: Int
-    var minor: Int
-    var patch: Int
-    var prerelease: [String]
-
-    static func parse(_ raw: String) -> SemanticVersion? {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-        if text.first == "v" || text.first == "V" { text.removeFirst() }
-        let withoutBuild = text.split(separator: "+", maxSplits: 1, omittingEmptySubsequences: false)[0]
-        let pieces = withoutBuild.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-        let core = pieces[0].split(separator: ".", omittingEmptySubsequences: false)
-        guard (1...3).contains(core.count) else { return nil }
-        var numbers: [Int] = []
-        for part in core {
-            guard let value = Int(part), value >= 0, String(value) == part else { return nil }
-            numbers.append(value)
-        }
-        while numbers.count < 3 { numbers.append(0) }
-        var prerelease: [String] = []
-        if pieces.count == 2 {
-            let identifiers = pieces[1].split(separator: ".", omittingEmptySubsequences: false)
-            guard !identifiers.isEmpty else { return nil }
-            for item in identifiers {
-                let identifier = String(item)
-                guard isIdentifier(identifier) else { return nil }
-                prerelease.append(identifier)
-            }
-        }
-        return SemanticVersion(major: numbers[0], minor: numbers[1], patch: numbers[2], prerelease: prerelease)
-    }
-
-    private static func isIdentifier(_ text: String) -> Bool {
-        guard !text.isEmpty else { return false }
-        let allowed = text.allSatisfy { character in
-            character.isASCII && (character.isLetter || character.isNumber || character == "-")
-        }
-        guard allowed else { return false }
-        if text.allSatisfy(\.isNumber), text.count > 1, text.first == "0" { return false }
-        return true
-    }
-
-    static func < (lhs: SemanticVersion, rhs: SemanticVersion) -> Bool {
-        if lhs.major != rhs.major { return lhs.major < rhs.major }
-        if lhs.minor != rhs.minor { return lhs.minor < rhs.minor }
-        if lhs.patch != rhs.patch { return lhs.patch < rhs.patch }
-        if lhs.prerelease.isEmpty { return false }
-        if rhs.prerelease.isEmpty { return true }
-        let count = min(lhs.prerelease.count, rhs.prerelease.count)
-        for index in 0..<count {
-            let left = lhs.prerelease[index]
-            let right = rhs.prerelease[index]
-            if left == right { continue }
-            switch (Self.number(left), Self.number(right)) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (.some, .none):
-                return true
-            case (.none, .some):
-                return false
-            default:
-                return left < right
-            }
-        }
-        return lhs.prerelease.count < rhs.prerelease.count
-    }
-
-    private static func number(_ text: String) -> Int? {
-        guard text.allSatisfy(\.isNumber) else { return nil }
-        return Int(text)
-    }
-}
+private let bundleIdentifier = "com.doom2016.secure"
+private let releaseAPI: URL? = {
+    guard let repository = Bundle.main.object(forInfoDictionaryKey: "DOOMUpdateRepository") as? String,
+          repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil else { return nil }
+    return URL(string: "https://api.github.com/repos/\(repository)/releases/latest")
+}()
 
 private struct ReleaseInfo {
     var tag: String
@@ -157,6 +87,9 @@ private enum UpdateFeed {
             return (try parse(data, response: response, from: override), override)
         }
         #endif
+        guard let releaseAPI else {
+            throw UpdateFailure("This build has no update repository configured.")
+        }
         let (data, response) = try await data(from: releaseAPI, tokenHost: true)
         return (try parse(data, response: response, from: releaseAPI), releaseAPI)
     }
@@ -189,7 +122,7 @@ private enum UpdateFeed {
         return base.deletingLastPathComponent().appendingPathComponent(text)
     }
 
-    private static func accept(_ url: URL) -> Bool {
+    fileprivate static func accept(_ url: URL) -> Bool {
         #if DEBUG
         if isOverridden {
             if url.isFileURL { return true }
@@ -312,7 +245,7 @@ private struct VerifyOutcome: Sendable {
 }
 
 private enum BundleVerifier {
-    static func check(newApp: URL, currentApp: URL, requireNotarization: Bool) -> VerifyOutcome {
+    static func check(newApp: URL, currentApp: URL, expectedVersion: String, requireNotarization: Bool) -> VerifyOutcome {
         let verified = run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", newApp.path])
         guard verified.status == 0 else {
             return VerifyOutcome(failure: "The download failed its code signature check. \(clip(verified.output))", skippedNotarization: false)
@@ -330,6 +263,13 @@ private enum BundleVerifier {
         }
         guard downloaded.identifier == bundleIdentifier else {
             return VerifyOutcome(failure: "The download is \(downloaded.identifier ?? "a different app"), not \(bundleIdentifier).", skippedNotarization: false)
+        }
+        guard let downloadedVersion = Bundle(url: newApp)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let currentVersion = Bundle(url: currentApp)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String else {
+            return VerifyOutcome(failure: "The app bundle has no version.", skippedNotarization: false)
+        }
+        if let failure = UpdatePolicy.failure(downloaded: downloadedVersion, current: currentVersion, expected: expectedVersion) {
+            return VerifyOutcome(failure: failure, skippedNotarization: false)
         }
         guard requireNotarization else {
             return VerifyOutcome(failure: nil, skippedNotarization: true)
@@ -472,6 +412,10 @@ private final class ZipDownload: NSObject, URLSessionDownloadDelegate, @unchecke
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        guard let url = request.url, UpdateFeed.accept(url) else {
+            completionHandler(nil)
+            return
+        }
         var request = request
         #if DEBUG
         let host = request.url?.host?.lowercased() ?? ""
@@ -548,6 +492,18 @@ final class AppUpdateModel: ObservableObject {
         let destination = Bundle.main.bundleURL
         if let reason = installBlocker() {
             phase = .failed(reason)
+            return
+        }
+        guard let release else { return }
+        #if DEBUG
+        let requireNotarization = !UpdateFeed.skipNotarization
+        #else
+        let requireNotarization = true
+        #endif
+        let verification = BundleVerifier.check(newApp: verifiedApp, currentApp: destination,
+            expectedVersion: release.tag, requireNotarization: requireNotarization)
+        if let failure = verification.failure {
+            phase = .failed(failure)
             return
         }
         do {
@@ -680,7 +636,7 @@ final class AppUpdateModel: ObservableObject {
         let requireNotarization = true
         #endif
         let outcome = await Task.detached(priority: .userInitiated) {
-            BundleVerifier.check(newApp: app, currentApp: current, requireNotarization: requireNotarization)
+            BundleVerifier.check(newApp: app, currentApp: current, expectedVersion: version, requireNotarization: requireNotarization)
         }.value
         guard !Task.isCancelled else { return }
         if let failure = outcome.failure {

@@ -15,8 +15,14 @@ if [[ "${DEBUG:-}" == "1" ]]; then
     exit 1
 fi
 
+REPOSITORY="${UPDATE_REPOSITORY:?Set UPDATE_REPOSITORY to your fork owner/repository}"
+if [[ "$REPOSITORY" == "truwa/doom2016-launcher" || ! "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    echo "Use this fork's repository for releases." >&2
+    exit 1
+fi
+export UPDATE_REPOSITORY
 PROFILE="${NOTARY_KEYCHAIN_PROFILE:-doom2016-notary}"
-SIGN_ID="${SIGN_ID:-Developer ID Application: Mehmet Akif Ozdas (2DG34W64L7)}"
+SIGN_ID="${SIGN_ID:?Set SIGN_ID to your Developer ID Application identity}"
 if ! security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
     echo "Developer ID certificate not found: $SIGN_ID" >&2
     exit 1
@@ -27,7 +33,7 @@ if ! history_err="$(xcrun notarytool history --keychain-profile "$PROFILE" 2>&1 
 No notarytool keychain profile named "$PROFILE".
 Store the Apple ID credentials in the Keychain once. Do not put the password in the repo:
 
-  xcrun notarytool store-credentials "$PROFILE" --apple-id YOU@icloud.com --team-id 2DG34W64L7
+  xcrun notarytool store-credentials "$PROFILE" --apple-id YOU@icloud.com --team-id YOUR_TEAM_ID
 
 Use an app-specific password. Set NOTARY_KEYCHAIN_PROFILE if the profile has another name.
 EOF
@@ -180,12 +186,12 @@ spctl --assess --type open --context context:primary-signature --verbose=4 "$FIN
 
 if [[ -n "$NOTES_FILE" ]]; then
     gh release create "$VERSION" "$FINAL_ZIP" "$FINAL_DMG" \
-        --repo truwa/doom2016-launcher \
+        --repo "$REPOSITORY" \
         --title "$VERSION" \
         --notes-file "$NOTES_FILE"
 else
     gh release create "$VERSION" "$FINAL_ZIP" "$FINAL_DMG" \
-        --repo truwa/doom2016-launcher \
+        --repo "$REPOSITORY" \
         --title "$VERSION" \
         --notes "$(cat <<EOF
 Download DOOM-2016-${VERSION}.dmg, open it, and drag Doom2016GOG.app to Applications. The readme is in the disk image.
