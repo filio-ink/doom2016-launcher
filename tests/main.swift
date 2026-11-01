@@ -7,12 +7,8 @@ func check(_ condition: @autoclosure () -> Bool, _ label: String) {
 }
 
 let state = UUID().uuidString
-check(GogOAuthPolicy.permitsNavigation(URL(string: "https://auth.gog.com/login")!, isMainFrame: true), "GOG login navigation")
-check(!GogOAuthPolicy.permitsNavigation(URL(string: "https://auth.gog.com.attacker.invalid/login")!, isMainFrame: true), "foreign main frame")
-check(!GogOAuthPolicy.permitsNavigation(URL(string: "http://auth.gog.com/login")!, isMainFrame: true), "HTTP navigation")
 let prefix = "https://embed.gog.com/on_login_success?origin=client&state=\(state)&code=INERT"
-check(GogOAuthPolicy.code(from: URL(string: prefix)!, state: state, isMainFrame: true) == "INERT", "valid callback")
-check(GogOAuthPolicy.code(from: URL(string: prefix)!, state: state, isMainFrame: false) == nil, "iframe")
+check(GogOAuthPolicy.code(from: URL(string: prefix)!, state: state) == "INERT", "valid callback")
 for address in [
     prefix.replacingOccurrences(of: "embed.gog.com", with: "gog.com.attacker.invalid"),
     prefix.replacingOccurrences(of: "embed.gog.com", with: "notgog.com"),
@@ -26,7 +22,7 @@ for address in [
     prefix.replacingOccurrences(of: "embed.gog.com", with: "embed.gog.com:444"),
     prefix.replacingOccurrences(of: "embed.gog.com", with: "user@embed.gog.com"),
 ] {
-    check(GogOAuthPolicy.code(from: URL(string: address)!, state: state, isMainFrame: true) == nil, address)
+    check(GogOAuthPolicy.code(from: URL(string: address)!, state: state) == nil, address)
 }
 let request = URLComponents(url: GogOAuthPolicy.authorizationURL(state: state), resolvingAgainstBaseURL: false)!
 check(request.queryItems!.contains(URLQueryItem(name: "state", value: state)), "request carries state")
@@ -40,4 +36,21 @@ for values in [
 ] {
     check(UpdatePolicy.failure(downloaded: values.0, current: values.1, expected: values.2) != nil, "reject mismatch or downgrade")
 }
+func callback(for attempt: GogBrowserSignInAttempt) -> String {
+    "https://embed.gog.com/on_login_success?origin=client&state=\(attempt.state)&code=INERT"
+}
+var attempt = GogBrowserSignInAttempt()
+check(attempt.consume(callback(for: attempt)) == nil, "callback before browser opened")
+attempt.browserDidOpen()
+check(attempt.consume(prefix) == nil, "callback from another attempt")
+check(attempt.consume("INERT") == nil, "raw code is not a complete callback")
+check(attempt.consume(String(repeating: "x", count: 8193)) == nil, "oversized callback")
+let returnedURL = callback(for: attempt)
+check(attempt.consume("  " + returnedURL + "\n") == "INERT", "callback entered after browser login")
+check(attempt.consume(returnedURL) == nil, "callback is consumed only once")
+let otherAttempt = GogBrowserSignInAttempt()
+check(otherAttempt.state != attempt.state, "new attempt uses a fresh nonce")
+let browserRequest = URLComponents(url: attempt.authorizationURL, resolvingAgainstBaseURL: false)!
+check(browserRequest.host == "auth.gog.com", "browser starts at GOG")
+check(browserRequest.queryItems!.contains(URLQueryItem(name: "state", value: attempt.state)), "browser request carries attempt nonce")
 print("Passed \(checks) Swift security policy checks")

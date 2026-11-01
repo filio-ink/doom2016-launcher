@@ -65,6 +65,7 @@ Requires an Apple silicon Mac, Xcode/Swift with a macOS 26 SDK, and Python 3.10+
 ```sh
 bash scripts/test-security.sh
 ./build_app.sh
+python3 scripts/package-dmg.py
 ```
 
 The result is dist/Doom2016GOG.app. By default the bundle and nested Python executables
@@ -81,11 +82,14 @@ caches already exist. Changing a pin requires deliberately updating version, URL
 size and SHA-256 in that checked-in manifest. Do not obtain an expected checksum from
 an untrusted download at runtime.
 
-GOG callbacks require HTTPS, the exact embed.gog.com/on_login_success endpoint,
-a matching one-time state and the main frame. GOG sign-in remains in an ephemeral
-WKWebView because this project does not own GOG’s registered HTTPS redirect domain;
-full sign-in must be tested with a real GOG account after changes. The launcher does
-not weaken callback checks if the server omits state.
+GOG sign-in opens in the default system browser, which supports Google and other
+SSO providers. Click Open GOG in Browser, finish signing in, then copy the full
+return address from the browser into the launcher's protected field and Continue.
+The return address must be the exact HTTPS embed.gog.com/on_login_success endpoint
+with the current attempt's state. It is accepted once, cleared immediately and
+never logged. A code alone is not accepted. The project does not own GOG's HTTPS
+redirect domain, so it cannot register an automatic system authentication callback
+for that domain. Google sign-in is never loaded inside an app-controlled WebView.
 
 Regression checks cover archive traversal and symlink chains, checksum failures,
 corrupted caches, legacy Wine receipts, GOG origins/state/frames and update rollback.

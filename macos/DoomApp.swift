@@ -2,7 +2,6 @@ import AppKit
 import Darwin
 import SwiftUI
 import UniformTypeIdentifiers
-import WebKit
 
 private enum SupportFolder {
     static let url = FileManager.default.homeDirectoryForCurrentUser
@@ -1363,7 +1362,7 @@ struct ContentView: View {
                 GogSignIn { code in
                     model.finishGogSignIn(code)
                 }
-                .frame(width: 640, height: 520)
+                .frame(width: 560)
                 HStack {
                     Spacer()
                     Button("Cancel") { model.showGogLogin = false }
@@ -1482,7 +1481,7 @@ struct DoomApp: App {
         }
         .defaultSize(width: 680, height: 280)
         .commands {
-            CommandGroup(after: .appInfo) {
+            CommandGroup(after: .newItem) {
                 Button(model.gogDownloading ? "Stop Download" : (model.gameReady ? "Update Doom from GOG" : "Install Doom from GOG…")) {
                     if model.gogDownloading {
                         model.stopGogDownload()
@@ -1493,6 +1492,8 @@ struct DoomApp: App {
                     }
                 }
                 .disabled(model.running || (model.updating && !model.gogDownloading))
+            }
+            CommandGroup(after: .appInfo) {
                 Button("Check for Updates") { updates.check() }
                     .disabled(model.updating || model.running || updates.busy)
                 Button("Open Game Save Folder") { model.openSaveFolder() }
@@ -1504,57 +1505,54 @@ struct DoomApp: App {
     }
 }
 
-private struct GogSignIn: NSViewRepresentable {
+private struct GogSignIn: View {
     var onCode: (String) -> Void
+    @State private var attempt = GogBrowserSignInAttempt()
+    @State private var returnURL = ""
+    @State private var errorMessage: String?
 
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        let web = WKWebView(frame: .zero, configuration: configuration)
-        web.navigationDelegate = context.coordinator
-        web.load(URLRequest(url: GogOAuthPolicy.authorizationURL(state: context.coordinator.state)))
-        return web
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("1. Open GOG in your browser and sign in. You can choose Continue with Google there.")
+            Button("Open GOG in Browser") {
+                if NSWorkspace.shared.open(attempt.authorizationURL) {
+                    attempt.browserDidOpen()
+                    errorMessage = nil
+                } else {
+                    errorMessage = "The browser could not be opened. Please try again."
+                }
+            }
+            Text("2. When GOG finishes signing in, copy the full address from the browser address bar, return here, and paste it below.")
+            SecureField("Paste the full return URL", text: $returnURL)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!attempt.browserOpened || attempt.completed)
+                .onSubmit(complete)
+            Text("The address starts with https://embed.gog.com/on_login_success. Keep it private; it is used only to finish this sign-in.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("Continue") { complete() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!attempt.browserOpened || attempt.completed || returnURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .onDisappear { returnURL = "" }
     }
 
-    func updateNSView(_ web: WKWebView, context: Context) {}
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onCode: onCode)
-    }
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        let onCode: (String) -> Void
-        var delivered = false
-        let state = UUID().uuidString
-
-        init(onCode: @escaping (String) -> Void) {
-            self.onCode = onCode
+    private func complete() {
+        guard let code = attempt.consume(returnURL) else {
+            errorMessage = "This is not the complete return address for this sign-in. Copy the full browser address after GOG finishes signing in."
+            return
         }
-
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if deliver(navigationAction.request.url, isMainFrame: navigationAction.targetFrame?.isMainFrame == true) {
-                decisionHandler(.cancel)
-                return
-            }
-            guard let url = navigationAction.request.url,
-                  GogOAuthPolicy.permitsNavigation(url, isMainFrame: navigationAction.targetFrame?.isMainFrame == true) else {
-                decisionHandler(.cancel)
-                return
-            }
-            decisionHandler(.allow)
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            _ = deliver(webView.url, isMainFrame: true)
-        }
-
-        private func deliver(_ url: URL?, isMainFrame: Bool) -> Bool {
-            guard !delivered, let url,
-                  let code = GogOAuthPolicy.code(from: url, state: state, isMainFrame: isMainFrame) else { return false }
-            delivered = true
-            onCode(code)
-            return true
-        }
+        returnURL = ""
+        errorMessage = nil
+        onCode(code)
     }
 }
 

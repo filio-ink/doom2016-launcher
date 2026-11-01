@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 APP="$ROOT/dist/Doom2016GOG.app"
 KOSMIC_SRC="$ROOT/dist/upstream/kosmickrisp"
 PYTHON_DIR="$ROOT/dist/python-standalone"
-VERSION="${VERSION:-1.3.1}"
-BUILD="${BUILD:-131}"
+VERSION="${VERSION:-1.3.2}"
+BUILD="${BUILD:-132}"
 UPDATE_REPOSITORY="${UPDATE_REPOSITORY-filio-ink/doom2016-launcher}"
 if [[ ! "$VERSION" =~ ^[0-9]+([.][0-9]+){1,2}(-[0-9A-Za-z.-]+)?([+][0-9A-Za-z.-]+)?$ || ! "$BUILD" =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
     echo "Invalid app version or build number." >&2
@@ -94,7 +94,7 @@ mkdir -p "$APP/Contents/Resources/python"
 rsync -a "$PYTHON_DIR/" "$APP/Contents/Resources/python/"
 
 # Without -target, the binary's minimum becomes the SDK version (27 on this Mac) and macOS 26 will not open it.
-SWIFT_FLAGS=(-parse-as-library -O -target arm64-apple-macos26.0 -framework SwiftUI -framework AppKit -framework WebKit -framework Security)
+SWIFT_FLAGS=(-parse-as-library -O -target arm64-apple-macos26.0 -framework SwiftUI -framework AppKit -framework Security)
 if [[ "${DEBUG:-}" == "1" ]]; then
     SWIFT_FLAGS+=(-DDEBUG)
 fi

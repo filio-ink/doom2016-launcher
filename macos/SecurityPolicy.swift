@@ -93,13 +93,6 @@ enum UpdatePolicy {
 
 /// A callback belongs to one sign-in attempt and one exact GOG redirect URI.
 enum GogOAuthPolicy {
-    static func permitsNavigation(_ url: URL, isMainFrame: Bool) -> Bool {
-        guard let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              parts.scheme == "https", parts.user == nil, parts.password == nil else { return false }
-        guard isMainFrame else { return true }
-        return ["gog.com", "www.gog.com", "auth.gog.com", "login.gog.com", "embed.gog.com"].contains(parts.host ?? "")
-    }
-
     static func authorizationURL(state: String) -> URL {
         var parts = URLComponents(string: "https://auth.gog.com/auth")!
         parts.queryItems = [
@@ -112,8 +105,8 @@ enum GogOAuthPolicy {
         return parts.url!
     }
 
-    static func code(from url: URL, state: String, isMainFrame: Bool) -> String? {
-        guard isMainFrame, !state.isEmpty,
+    static func code(from url: URL, state: String) -> String? {
+        guard !state.isEmpty,
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
               parts.scheme == "https", parts.host == "embed.gog.com",
               parts.port == nil || parts.port == 443,
@@ -126,6 +119,27 @@ enum GogOAuthPolicy {
         }
         guard only("origin") == "client", only("state") == state,
               let code = only("code"), !code.isEmpty else { return nil }
+        return code
+    }
+}
+
+/// The system browser handles Google/SSO; only a callback for this attempt is consumed.
+struct GogBrowserSignInAttempt {
+    let state = UUID().uuidString
+    private(set) var browserOpened = false
+    private(set) var completed = false
+
+    var authorizationURL: URL { GogOAuthPolicy.authorizationURL(state: state) }
+
+    mutating func browserDidOpen() {
+        browserOpened = true
+    }
+
+    mutating func consume(_ text: String) -> String? {
+        guard browserOpened, !completed, text.utf8.count <= 8192,
+              let url = URL(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let code = GogOAuthPolicy.code(from: url, state: state) else { return nil }
+        completed = true
         return code
     }
 }
